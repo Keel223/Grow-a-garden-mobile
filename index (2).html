@@ -1,0 +1,1179 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Сад - Игра</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+        }
+        #root {
+            width: 100vw;
+            height: 100vh;
+        }
+        * {
+            touch-action: pan-x pan-y;
+        }
+        .control-area {
+            touch-action: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const Garden3D = () => {
+          const mountRef = useRef(null);
+          const sceneRef = useRef(null);
+          const rendererRef = useRef(null);
+          const cameraRef = useRef(null);
+          const plotMeshesRef = useRef([]);
+          const plantMeshesRef = useRef([]);
+          const frameId = useRef(null);
+
+          const [coins, setCoins] = useState(100);
+          const [garden, setGarden] = useState(Array(12).fill(null));
+          const [selectedSeed, setSelectedSeed] = useState('tomato');
+          const [waterAmount, setWaterAmount] = useState(10);
+          const [notifications, setNotifications] = useState([]);
+          const [isMobile, setIsMobile] = useState(false);
+          const [touchControls, setTouchControls] = useState({
+            rotation: 0,
+            zoom: 12,
+            autoRotate: true
+          });
+          const [isFirstPerson, setIsFirstPerson] = useState(false);
+          const [playerPosition, setPlayerPosition] = useState({ x: 0, z: 0 });
+          const [cameraRotation, setCameraRotation] = useState({ horizontal: 0, vertical: 0 });
+          const [mobileJoystick, setMobileJoystick] = useState({ x: 0, y: 0, active: false });
+          const [gyroEnabled, setGyroEnabled] = useState(false);
+          const [gyroSupported, setGyroSupported] = useState(false);
+          
+          const keysRef = useRef({});
+          const mouseRef = useRef({ isDown: false, lastX: 0, lastY: 0 });
+          const joystickRef = useRef(null);
+          const gyroRef = useRef({ alpha: 0, beta: 0, gamma: 0, lastAlpha: 0 });
+
+          const seeds = {
+            tomato: { name: '🍅 Томат', cost: 10, growTime: 5000, reward: 25, color: 0xff6b6b },
+            carrot: { name: '🥕 Морковь', cost: 8, growTime: 4000, reward: 20, color: 0xff9f43 },
+            flower: { name: '🌸 Цветок', cost: 15, growTime: 3000, reward: 30, color: 0xff6b9d },
+            apple: { name: '🍎 Яблоко', cost: 25, growTime: 8000, reward: 50, color: 0xff4757 },
+            corn: { name: '🌽 Кукуруза', cost: 20, growTime: 6000, reward: 40, color: 0xffa502 },
+            strawberry: { name: '🍓 Клубника', cost: 18, growTime: 4500, reward: 35, color: 0xff3838 }
+          };
+
+          const addNotification = (message) => {
+            const id = Date.now();
+            setNotifications(prev => [...prev, { id, message }]);
+            setTimeout(() => {
+              setNotifications(prev => prev.filter(n => n.id !== id));
+            }, 3000);
+          };
+
+          useEffect(() => {
+            const checkMobile = () => {
+              const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || 
+                                    window.innerWidth <= 768;
+              setIsMobile(isMobileDevice);
+              
+              if (isMobileDevice && 'DeviceOrientationEvent' in window) {
+                setGyroSupported(true);
+              }
+            };
+            
+            checkMobile();
+            window.addEventListener('resize', checkMobile);
+            return () => window.removeEventListener('resize', checkMobile);
+          }, [isMobile, touchControls]);
+
+          const requestGyroPermission = async () => {
+            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+              try {
+                const permission = await DeviceOrientationEvent.requestPermission();
+                if (permission === 'granted') {
+                  setGyroEnabled(true);
+                  return true;
+                }
+              } catch (error) {
+                console.log('Ошибка запроса разрешения гироскопа:', error);
+              }
+            } else {
+              setGyroEnabled(true);
+              return true;
+            }
+            return false;
+          };
+
+          useEffect(() => {
+            const currentMount = mountRef.current;
+            if (!currentMount) return;
+
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            sceneRef.current = scene;
+
+            const camera = new THREE.PerspectiveCamera(75, currentMount.clientWidth / currentMount.clientHeight, 0.1, 1000);
+            camera.position.set(0, 8, 10);
+            camera.lookAt(0, 0, 0);
+            cameraRef.current = camera;
+
+            const renderer = new THREE.WebGLRenderer({ 
+              antialias: !isMobile,
+              powerPreference: "high-performance",
+              stencil: false,
+              depth: true
+            });
+            renderer.setSize(currentMount.clientWidth, currentMount.clientHeight);
+            renderer.shadowMap.enabled = !isMobile;
+            if (!isMobile) {
+              renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            }
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            currentMount.appendChild(renderer.domElement);
+            rendererRef.current = renderer;
+
+            const ambientLight = new THREE.AmbientLight(0x404040, isMobile ? 0.8 : 0.6);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, isMobile ? 0.8 : 1);
+            directionalLight.position.set(5, 10, 5);
+            if (!isMobile) {
+              directionalLight.castShadow = true;
+              directionalLight.shadow.mapSize.width = 1024;
+              directionalLight.shadow.mapSize.height = 1024;
+              directionalLight.shadow.camera.near = 0.5;
+              directionalLight.shadow.camera.far = 50;
+            }
+            scene.add(directionalLight);
+
+            const groundGeometry = new THREE.PlaneGeometry(20, 20);
+            const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x228B22 });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            if (!isMobile) {
+              ground.receiveShadow = true;
+            }
+            scene.add(ground);
+
+            const plotMeshes = [];
+            for (let i = 0; i < 12; i++) {
+              const row = Math.floor(i / 3);
+              const col = i % 3;
+              
+              const plotGeometry = new THREE.BoxGeometry(1.5, 0.2, 1.5);
+              const plotMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+              const plotMesh = new THREE.Mesh(plotGeometry, plotMaterial);
+              
+              plotMesh.position.set((col - 1) * 2, 0.1, (row - 1.5) * 2);
+              if (!isMobile) {
+                plotMesh.receiveShadow = true;
+              }
+              plotMesh.userData = { plotIndex: i };
+              
+              scene.add(plotMesh);
+              plotMeshes.push(plotMesh);
+            }
+            plotMeshesRef.current = plotMeshes;
+
+            let mouseX = 0;
+            let mouseY = 0;
+            let lastTouchX = 0;
+            let lastTouchY = 0;
+            let touchStartDistance = 0;
+
+            const onMouseMove = (event) => {
+              if (!isMobile) {
+                if (isFirstPerson && mouseRef.current.isDown) {
+                  const deltaX = event.clientX - mouseRef.current.lastX;
+                  const deltaY = event.clientY - mouseRef.current.lastY;
+                  
+                  setCameraRotation(prev => ({
+                    horizontal: prev.horizontal - deltaX * 0.002,
+                    vertical: Math.max(-Math.PI/3, Math.min(Math.PI/3, prev.vertical - deltaY * 0.002))
+                  }));
+                  
+                  mouseRef.current.lastX = event.clientX;
+                  mouseRef.current.lastY = event.clientY;
+                } else {
+                  mouseX = (event.clientX / window.innerWidth) * 2 - 1;
+                  mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
+                }
+              }
+            };
+
+            const onMouseDown = (event) => {
+              if (isFirstPerson && !isMobile) {
+                mouseRef.current.isDown = true;
+                mouseRef.current.lastX = event.clientX;
+                mouseRef.current.lastY = event.clientY;
+              }
+            };
+
+            const onMouseUp = (event) => {
+              mouseRef.current.isDown = false;
+            };
+
+            const onTouchStart = (event) => {
+              event.preventDefault();
+              setTouchControls(prev => ({ ...prev, autoRotate: false }));
+              
+              if (event.touches.length === 1) {
+                lastTouchX = event.touches[0].clientX;
+                lastTouchY = event.touches[0].clientY;
+              } else if (event.touches.length === 2) {
+                const dx = event.touches[0].clientX - event.touches[1].clientX;
+                const dy = event.touches[0].clientY - event.touches[1].clientY;
+                touchStartDistance = Math.sqrt(dx * dx + dy * dy);
+              }
+            };
+
+            const onTouchMove = (event) => {
+              event.preventDefault();
+              
+              if (event.touches.length === 1) {
+                if (isFirstPerson) {
+                  const deltaX = event.touches[0].clientX - lastTouchX;
+                  const deltaY = event.touches[0].clientY - lastTouchY;
+                  
+                  setCameraRotation(prev => ({
+                    horizontal: prev.horizontal - deltaX * 0.003,
+                    vertical: Math.max(-Math.PI/3, Math.min(Math.PI/3, prev.vertical - deltaY * 0.003))
+                  }));
+                } else {
+                  const deltaX = event.touches[0].clientX - lastTouchX;
+                  setTouchControls(prev => ({
+                    ...prev,
+                    rotation: prev.rotation + deltaX * 0.01
+                  }));
+                }
+                lastTouchX = event.touches[0].clientX;
+                lastTouchY = event.touches[0].clientY;
+              } else if (event.touches.length === 2 && !isFirstPerson) {
+                const dx = event.touches[0].clientX - event.touches[1].clientX;
+                const dy = event.touches[0].clientY - event.touches[1].clientY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const scale = distance / touchStartDistance;
+                
+                setTouchControls(prev => ({
+                  ...prev,
+                  zoom: Math.max(6, Math.min(20, prev.zoom / scale))
+                }));
+                touchStartDistance = distance;
+              }
+            };
+
+            const onTouchEnd = (event) => {
+              event.preventDefault();
+              if (event.touches.length === 0) {
+                setTimeout(() => {
+                  setTouchControls(prev => ({ ...prev, autoRotate: true }));
+                }, 3000);
+              }
+            };
+
+            const onMouseClick = (event) => {
+              if (!isMobile) {
+                handleInteraction(event.clientX, event.clientY);
+              }
+            };
+
+            let touchStartTime = 0;
+            let touchMoved = false;
+            
+            const onTouchStartForClick = (event) => {
+              touchStartTime = Date.now();
+              touchMoved = false;
+            };
+            
+            const onTouchMoveForClick = (event) => {
+              touchMoved = true;
+            };
+            
+            const onTouchEndForClick = (event) => {
+              const touchDuration = Date.now() - touchStartTime;
+              if (!touchMoved && touchDuration < 500 && event.changedTouches.length === 1) {
+                const touch = event.changedTouches[0];
+                handleInteraction(touch.clientX, touch.clientY);
+              }
+            };
+
+            const onKeyDown = (event) => {
+              keysRef.current[event.code] = true;
+              if (event.code === 'KeyF') {
+                setIsFirstPerson(prev => !prev);
+              }
+              if (event.code === 'Escape' && isFirstPerson) {
+                setIsFirstPerson(false);
+              }
+            };
+
+            const onKeyUp = (event) => {
+              keysRef.current[event.code] = false;
+            };
+
+            renderer.domElement.addEventListener('mousemove', onMouseMove);
+            renderer.domElement.addEventListener('mousedown', onMouseDown);
+            renderer.domElement.addEventListener('mouseup', onMouseUp);
+            renderer.domElement.addEventListener('click', onMouseClick);
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            
+            if (isMobile) {
+              renderer.domElement.addEventListener('touchstart', onTouchStart, { passive: false });
+              renderer.domElement.addEventListener('touchmove', onTouchMove, { passive: false });
+              renderer.domElement.addEventListener('touchend', onTouchEnd, { passive: false });
+              
+              renderer.domElement.addEventListener('touchstart', onTouchStartForClick);
+              renderer.domElement.addEventListener('touchmove', onTouchMoveForClick);
+              renderer.domElement.addEventListener('touchend', onTouchEndForClick);
+            }
+
+            const updatePlayerMovement = () => {
+              if (!isFirstPerson) return;
+              
+              const moveSpeed = 0.15;
+              let deltaX = 0;
+              let deltaZ = 0;
+              
+              if (keysRef.current['KeyW'] || keysRef.current['ArrowUp'] || mobileJoystick.y < -0.3) {
+                deltaZ -= moveSpeed;
+              }
+              if (keysRef.current['KeyS'] || keysRef.current['ArrowDown'] || mobileJoystick.y > 0.3) {
+                deltaZ += moveSpeed;
+              }
+              if (keysRef.current['KeyA'] || keysRef.current['ArrowLeft'] || mobileJoystick.x < -0.3) {
+                deltaX -= moveSpeed;
+              }
+              if (keysRef.current['KeyD'] || keysRef.current['ArrowRight'] || mobileJoystick.x > 0.3) {
+                deltaX += moveSpeed;
+              }
+              
+              if (isMobile && mobileJoystick.active) {
+                const joystickMultiplier = 1.8;
+                
+                const joystickDeltaX = mobileJoystick.x * moveSpeed * joystickMultiplier;
+                const joystickDeltaZ = -mobileJoystick.y * moveSpeed * joystickMultiplier;
+                
+                const cos = Math.cos(cameraRotation.horizontal);
+                const sin = Math.sin(cameraRotation.horizontal);
+                
+                const rotatedDeltaX = joystickDeltaX * cos - joystickDeltaZ * sin;
+                const rotatedDeltaZ = joystickDeltaX * sin + joystickDeltaZ * cos;
+                
+                deltaX += rotatedDeltaX;
+                deltaZ += rotatedDeltaZ;
+              }
+              
+              if (deltaX !== 0 || deltaZ !== 0) {
+                let finalDeltaX = deltaX;
+                let finalDeltaZ = deltaZ;
+                
+                if (!isMobile || !mobileJoystick.active) {
+                  const cos = Math.cos(cameraRotation.horizontal);
+                  const sin = Math.sin(cameraRotation.horizontal);
+                  
+                  finalDeltaX = deltaX * cos - deltaZ * sin;
+                  finalDeltaZ = deltaX * sin + deltaZ * cos;
+                }
+                
+                setPlayerPosition(prev => {
+                  const newX = Math.max(-8, Math.min(8, prev.x + finalDeltaX));
+                  const newZ = Math.max(-8, Math.min(8, prev.z + finalDeltaZ));
+                  return { x: newX, z: newZ };
+                });
+              }
+            };
+
+            let lastTime = 0;
+            const targetFPS = isMobile ? 30 : 60;
+            const frameInterval = 1000 / targetFPS;
+            
+            const animate = (currentTime) => {
+              frameId.current = requestAnimationFrame(animate);
+              
+              if (currentTime - lastTime < frameInterval) {
+                return;
+              }
+              lastTime = currentTime;
+              
+              updatePlayerMovement();
+              
+              if (isFirstPerson) {
+                camera.position.x = playerPosition.x;
+                camera.position.y = 2;
+                camera.position.z = playerPosition.z;
+                
+                const lookDirection = new THREE.Vector3(
+                  Math.sin(cameraRotation.horizontal) * Math.cos(cameraRotation.vertical),
+                  Math.sin(cameraRotation.vertical),
+                  Math.cos(cameraRotation.horizontal) * Math.cos(cameraRotation.vertical)
+                );
+                
+                const lookTarget = new THREE.Vector3(
+                  playerPosition.x + lookDirection.x,
+                  2 + lookDirection.y,
+                  playerPosition.z + lookDirection.z
+                );
+                
+                camera.lookAt(lookTarget);
+              } else if (isMobile) {
+                let rotationAngle;
+                if (touchControls.autoRotate) {
+                  rotationAngle = Date.now() * 0.0005;
+                } else {
+                  rotationAngle = touchControls.rotation;
+                }
+                
+                camera.position.x = Math.cos(rotationAngle) * touchControls.zoom;
+                camera.position.z = Math.sin(rotationAngle) * touchControls.zoom;
+                camera.position.y = 8;
+                camera.lookAt(0, 0, 0);
+              } else {
+                const time = Date.now() * 0.0005;
+                camera.position.x = Math.cos(time) * 12;
+                camera.position.z = Math.sin(time) * 12;
+                camera.position.y = 8;
+                camera.lookAt(0, 0, 0);
+              }
+              
+              renderer.render(scene, camera);
+            };
+
+            animate(0);
+
+            const handleResize = () => {
+              camera.aspect = currentMount.clientWidth / currentMount.clientHeight;
+              camera.updateProjectionMatrix();
+              renderer.setSize(currentMount.clientWidth, currentMount.clientHeight);
+            };
+            
+            window.addEventListener('resize', handleResize);
+
+            return () => {
+              window.removeEventListener('resize', handleResize);
+              renderer.domElement.removeEventListener('mousemove', onMouseMove);
+              renderer.domElement.removeEventListener('mousedown', onMouseDown);
+              renderer.domElement.removeEventListener('mouseup', onMouseUp);
+              renderer.domElement.removeEventListener('click', onMouseClick);
+              document.removeEventListener('keydown', onKeyDown);
+              document.removeEventListener('keyup', onKeyUp);
+              
+              if (isMobile) {
+                renderer.domElement.removeEventListener('touchstart', onTouchStart);
+                renderer.domElement.removeEventListener('touchmove', onTouchMove);
+                renderer.domElement.removeEventListener('touchend', onTouchEnd);
+                renderer.domElement.removeEventListener('touchstart', onTouchStartForClick);
+                renderer.domElement.removeEventListener('touchmove', onTouchMoveForClick);
+                renderer.domElement.removeEventListener('touchend', onTouchEndForClick);
+              }
+              
+              if (frameId.current) {
+                cancelAnimationFrame(frameId.current);
+              }
+              if (currentMount && currentMount.contains(renderer.domElement)) {
+                currentMount.removeChild(renderer.domElement);
+              }
+              renderer.dispose();
+            };
+          }, [isMobile, touchControls, isFirstPerson, playerPosition, cameraRotation, mobileJoystick]);
+
+          useEffect(() => {
+            if (!gyroEnabled || !isFirstPerson || !isMobile) return;
+
+            const handleDeviceOrientation = (event) => {
+              const alpha = event.alpha || 0;
+              const beta = event.beta || 0;
+              const gamma = event.gamma || 0;
+
+              if (gyroRef.current.lastAlpha === 0) {
+                gyroRef.current.lastAlpha = alpha;
+                return;
+              }
+
+              let deltaAlpha = alpha - gyroRef.current.lastAlpha;
+              
+              if (deltaAlpha > 180) deltaAlpha -= 360;
+              if (deltaAlpha < -180) deltaAlpha += 360;
+              
+              gyroRef.current.lastAlpha = alpha;
+
+              setCameraRotation(prev => ({
+                horizontal: prev.horizontal - (deltaAlpha * Math.PI / 180) * 0.5,
+                vertical: Math.max(-Math.PI/3, Math.min(Math.PI/3, -(beta - 90) * Math.PI / 180 * 0.3))
+              }));
+            };
+
+            window.addEventListener('deviceorientation', handleDeviceOrientation);
+            
+            return () => {
+              window.removeEventListener('deviceorientation', handleDeviceOrientation);
+            };
+          }, [gyroEnabled, isFirstPerson, isMobile]);
+
+          const createPlant3D = (plotIndex, plot) => {
+            if (!sceneRef.current || !plot) return;
+
+            const scene = sceneRef.current;
+            const seedData = seeds[plot.type];
+            if (!seedData) return;
+            
+            if (plantMeshesRef.current[plotIndex]) {
+              const oldPlant = plantMeshesRef.current[plotIndex];
+              scene.remove(oldPlant);
+              if (oldPlant.traverse) {
+                oldPlant.traverse((child) => {
+                  if (child.geometry) child.geometry.dispose();
+                  if (child.material && child.material.dispose) child.material.dispose();
+                });
+              }
+            }
+
+            const group = new THREE.Group();
+            const row = Math.floor(plotIndex / 3);
+            const col = plotIndex % 3;
+            group.position.set((col - 1) * 2, 0.2, (row - 1.5) * 2);
+            
+            group.userData = {
+              stage: plot.stage,
+              watered: plot.watered,
+              type: plot.type
+            };
+
+            const plantColor = seedData.color;
+
+            if (plot.stage === 0) {
+              const seedGeometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+              const seedMaterial = new THREE.MeshBasicMaterial({ color: 0x8B4513 });
+              const seedMesh = new THREE.Mesh(seedGeometry, seedMaterial);
+              seedMesh.position.y = 0.05;
+              group.add(seedMesh);
+            } else if (plot.stage === 1) {
+              const sproutGeometry = new THREE.ConeGeometry(0.1, 0.3, 3);
+              const sproutMaterial = new THREE.MeshBasicMaterial({ color: 0x228B22 });
+              const sproutMesh = new THREE.Mesh(sproutGeometry, sproutMaterial);
+              sproutMesh.position.y = 0.15;
+              group.add(sproutMesh);
+            } else if (plot.stage === 2) {
+              const stemGeometry = new THREE.CylinderGeometry(0.05, 0.05, 0.5, 6);
+              const stemMaterial = new THREE.MeshBasicMaterial({ color: 0x228B22 });
+              const stemMesh = new THREE.Mesh(stemGeometry, stemMaterial);
+              stemMesh.position.y = 0.25;
+              group.add(stemMesh);
+
+              const leafGeometry = new THREE.ConeGeometry(0.2, 0.3, 4);
+              const leafMaterial = new THREE.MeshBasicMaterial({ color: 0x32CD32 });
+              const leafMesh = new THREE.Mesh(leafGeometry, leafMaterial);
+              leafMesh.position.y = 0.5;
+              group.add(leafMesh);
+            } else if (plot.stage === 3) {
+              const stemGeometry = new THREE.CylinderGeometry(0.08, 0.08, 0.8, 6);
+              const stemMaterial = new THREE.MeshLambertMaterial({ color: 0x228B22 });
+              const stemMesh = new THREE.Mesh(stemGeometry, stemMaterial);
+              stemMesh.position.y = 0.4;
+              if (!isMobile) stemMesh.castShadow = true;
+              group.add(stemMesh);
+
+              const fruitGeometry = new THREE.SphereGeometry(0.25, 6, 4);
+              const fruitMaterial = new THREE.MeshLambertMaterial({ color: plantColor });
+              const fruitMesh = new THREE.Mesh(fruitGeometry, fruitMaterial);
+              fruitMesh.position.y = 0.8;
+              if (!isMobile) fruitMesh.castShadow = true;
+              group.add(fruitMesh);
+
+              const leafCount = isMobile ? 2 : 4;
+              for (let i = 0; i < leafCount; i++) {
+                const leafGeometry = new THREE.ConeGeometry(0.15, 0.3, 3);
+                const leafMaterial = new THREE.MeshBasicMaterial({ color: 0x32CD32 });
+                const leafMesh = new THREE.Mesh(leafGeometry, leafMaterial);
+                
+                const angle = (i / leafCount) * Math.PI * 2;
+                leafMesh.position.x = Math.cos(angle) * 0.2;
+                leafMesh.position.z = Math.sin(angle) * 0.2;
+                leafMesh.position.y = 0.6;
+                leafMesh.rotation.z = angle;
+                if (!isMobile) leafMesh.castShadow = true;
+                
+                group.add(leafMesh);
+              }
+            }
+
+            if (!plot.watered && plot.stage > 0) {
+              const waterGeometry = new THREE.SphereGeometry(0.1, 6, 4);
+              const waterMaterial = new THREE.MeshBasicMaterial({ 
+                color: 0x4169E1, 
+                transparent: true, 
+                opacity: 0.7 
+              });
+              const waterMesh = new THREE.Mesh(waterGeometry, waterMaterial);
+              waterMesh.position.y = 1.2;
+              group.add(waterMesh);
+            }
+
+            if (!isMobile) group.castShadow = true;
+            
+            scene.add(group);
+            plantMeshesRef.current[plotIndex] = group;
+            
+            group.updateMatrixWorld(true);
+          };
+
+          useEffect(() => {
+            garden.forEach((plot, index) => {
+              const existingPlant = plantMeshesRef.current[index];
+              
+              if (plot) {
+                const needsUpdate = !existingPlant || 
+                                   !existingPlant.userData || 
+                                   existingPlant.userData.stage !== plot.stage ||
+                                   existingPlant.userData.watered !== plot.watered;
+                
+                if (needsUpdate) {
+                  createPlant3D(index, plot);
+                }
+              } else if (existingPlant && sceneRef.current) {
+                sceneRef.current.remove(existingPlant);
+                existingPlant.traverse((child) => {
+                  if (child.geometry) child.geometry.dispose();
+                  if (child.material) child.material.dispose();
+                });
+                plantMeshesRef.current[index] = null;
+              }
+            });
+          }, [garden]);
+
+          useEffect(() => {
+            const growthInterval = setInterval(() => {
+              setGarden(prevGarden => {
+                let hasChanges = false;
+                const newGarden = prevGarden.map(plot => {
+                  if (plot && plot.watered && plot.stage < 3) {
+                    const timePassed = Date.now() - plot.plantedAt;
+                    const seedData = seeds[plot.type];
+                    if (!seedData) return plot;
+                    
+                    const requiredTime = seedData.growTime / 3;
+                    const nextStage = plot.stage + 1;
+                    
+                    if (timePassed > requiredTime * nextStage) {
+                      hasChanges = true;
+                      return { ...plot, stage: nextStage };
+                    }
+                  }
+                  return plot;
+                });
+                
+                return hasChanges ? newGarden : prevGarden;
+              });
+            }, 5000);
+
+            return () => clearInterval(growthInterval);
+          }, []);
+
+          useEffect(() => {
+            const waterInterval = setInterval(() => {
+              setWaterAmount(prev => Math.min(prev + 1, 15));
+            }, 10000);
+            return () => clearInterval(waterInterval);
+          }, []);
+
+          const plantSeed = (plotIndex) => {
+            const seedData = seeds[selectedSeed];
+            if (coins >= seedData.cost && !garden[plotIndex]) {
+              setCoins(prevCoins => prevCoins - seedData.cost);
+              setGarden(prevGarden => {
+                const newGarden = [...prevGarden];
+                newGarden[plotIndex] = {
+                  id: `plant_${plotIndex}_${Date.now()}`,
+                  type: selectedSeed,
+                  stage: 0,
+                  plantedAt: Date.now(),
+                  watered: false
+                };
+                return newGarden;
+              });
+              addNotification(`🌱 Посадили ${seedData.name}!`);
+            }
+          };
+
+          const waterPlant = (plotIndex) => {
+            if (waterAmount > 0 && garden[plotIndex] && !garden[plotIndex].watered) {
+              setWaterAmount(prevWater => prevWater - 1);
+              setGarden(prevGarden => {
+                const newGarden = [...prevGarden];
+                newGarden[plotIndex] = { 
+                  ...newGarden[plotIndex], 
+                  watered: true,
+                  wateredAt: Date.now()
+                };
+                return newGarden;
+              });
+              addNotification('💧 Растение полито!');
+            }
+          };
+
+          const harvestPlant = (plotIndex) => {
+            const plot = garden[plotIndex];
+            if (plot && plot.stage === 3) {
+              const seedData = seeds[plot.type];
+              const reward = seedData.reward;
+              
+              setCoins(prevCoins => prevCoins + reward);
+              setGarden(prevGarden => {
+                const newGarden = [...prevGarden];
+                newGarden[plotIndex] = null;
+                return newGarden;
+              });
+              addNotification(`🎉 Собрали ${seedData.name} за ${reward} монет!`);
+            }
+          };
+
+          const handlePlotClick = (plotIndex) => {
+            const plot = garden[plotIndex];
+            if (!plot) {
+              plantSeed(plotIndex);
+            } else if (plot.stage === 3) {
+              harvestPlant(plotIndex);
+            } else if (!plot.watered) {
+              waterPlant(plotIndex);
+            }
+          };
+
+          const buyWater = () => {
+            if (coins >= 50) {
+              setCoins(prevCoins => prevCoins - 50);
+              setWaterAmount(prevWater => Math.min(prevWater + 5, 15));
+              addNotification('💧 Купили воду!');
+            }
+          };
+
+          const handleInteraction = (clientX, clientY) => {
+            if (!rendererRef.current || !cameraRef.current || !plotMeshesRef.current) return;
+            
+            const renderer = rendererRef.current;
+            const camera = cameraRef.current;
+            const plotMeshes = plotMeshesRef.current;
+
+            const raycaster = new THREE.Raycaster();
+            const mouse = new THREE.Vector2();
+
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(plotMeshes);
+
+            if (intersects.length > 0) {
+              const plotIndex = intersects[0].object.userData.plotIndex;
+              handlePlotClick(plotIndex);
+            }
+          };
+
+          return React.createElement('div', {
+            className: "w-full h-full bg-gradient-to-b from-sky-300 to-green-300 relative",
+            style: { touchAction: 'none' }
+          },
+            React.createElement('div', {
+              ref: mountRef,
+              className: "w-full h-2/3 bg-gradient-to-b from-sky-200 to-sky-400 rounded-lg shadow-2xl",
+              style: { minHeight: '400px' }
+            }),
+
+            isFirstPerson && isMobile && React.createElement('div', {
+              className: "absolute inset-0 pointer-events-auto",
+              onTouchStart: (e) => {
+                if (e.target === e.currentTarget || e.target.closest('.control-area')) {
+                  e.preventDefault();
+                  const touch = e.touches[0];
+                  mouseRef.current.lastX = touch.clientX;
+                  mouseRef.current.lastY = touch.clientY;
+                  mouseRef.current.isDown = true;
+                }
+              },
+              onTouchMove: (e) => {
+                if (mouseRef.current.isDown && (e.target === e.currentTarget || e.target.closest('.control-area'))) {
+                  e.preventDefault();
+                  const touch = e.touches[0];
+                  const deltaX = touch.clientX - mouseRef.current.lastX;
+                  const deltaY = touch.clientY - mouseRef.current.lastY;
+                  
+                  setCameraRotation(prev => ({
+                    horizontal: prev.horizontal - deltaX * 0.004,
+                    vertical: Math.max(-Math.PI/3, Math.min(Math.PI/3, prev.vertical - deltaY * 0.004))
+                  }));
+                  
+                  mouseRef.current.lastX = touch.clientX;
+                  mouseRef.current.lastY = touch.clientY;
+                }
+              },
+              onTouchEnd: (e) => {
+                mouseRef.current.isDown = false;
+              },
+              style: { touchAction: 'none' }
+            },
+              React.createElement('div', {
+                className: "absolute top-4 left-4 right-4 pointer-events-auto control-area"
+              },
+                React.createElement('select', {
+                  value: selectedSeed,
+                  onChange: (e) => setSelectedSeed(e.target.value),
+                  className: "w-full p-3 rounded-lg bg-white/90 text-black font-semibold text-base border-2 border-green-400 shadow-lg",
+                  style: { touchAction: 'manipulation' }
+                },
+                  Object.entries(seeds).map(([key, seed]) =>
+                    React.createElement('option', {
+                      key: key,
+                      value: key
+                    }, `${seed.name} - 💰${seed.cost} монет`)
+                  )
+                )
+              ),
+
+              React.createElement('div', {
+                className: "absolute right-4 top-1/2 transform -translate-y-1/2 pointer-events-auto control-area"
+              },
+                React.createElement('div', {
+                  className: "flex flex-col items-center gap-6"
+                },
+                  React.createElement('div', {
+                    className: "flex flex-col items-center"
+                  },
+                    React.createElement('button', {
+                      onTouchStart: (e) => {
+                        e.preventDefault();
+                        if (rendererRef.current) {
+                          const rect = rendererRef.current.domElement.getBoundingClientRect();
+                          const centerX = rect.left + rect.width / 2;
+                          const centerY = rect.top + rect.height / 2;
+                          handleInteraction(centerX, centerY);
+                        }
+                      },
+                      className: "w-16 h-16 bg-green-600/80 rounded-full text-white text-2xl border-4 border-white/40 active:bg-green-700 flex items-center justify-center shadow-lg",
+                      style: { touchAction: 'none' }
+                    }, '🌱'),
+                    React.createElement('div', {
+                      className: "text-white/70 text-xs text-center mt-1"
+                    }, 'Действие')
+                  ),
+
+                  React.createElement('div', {
+                    className: "flex flex-col items-center"
+                  },
+                    React.createElement('button', {
+                      onTouchStart: (e) => {
+                        e.preventDefault();
+                        buyWater();
+                      },
+                      disabled: coins < 50,
+                      className: "w-14 h-14 bg-blue-600/80 rounded-full text-white text-xl border-4 border-white/40 active:bg-blue-700 disabled:bg-gray-500/80 flex items-center justify-center shadow-lg",
+                      style: { touchAction: 'none' }
+                    }, '💧'),
+                    React.createElement('div', {
+                      className: "text-white/70 text-xs text-center mt-1"
+                    }, 'Вода')
+                  ),
+
+                  gyroSupported && React.createElement('div', {
+                    className: "flex flex-col items-center"
+                  },
+                    React.createElement('button', {
+                      onTouchStart: async (e) => {
+                        e.preventDefault();
+                        if (!gyroEnabled) {
+                          const success = await requestGyroPermission();
+                          if (success) {
+                            addNotification('📱 Гироскоп включен! Поворачивайте телефон');
+                          } else {
+                            addNotification('❌ Не удалось включить гироскоп');
+                          }
+                        } else {
+                          setGyroEnabled(false);
+                          addNotification('📱 Гироскоп выключен');
+                        }
+                      },
+                      className: `w-14 h-14 rounded-full text-white text-xl border-4 border-white/40 flex items-center justify-center shadow-lg ${
+                        gyroEnabled ? 'bg-blue-600/80 active:bg-blue-700' : 'bg-gray-600/80 active:bg-gray-700'
+                      }`,
+                      style: { touchAction: 'none' }
+                    }, '📱'),
+                    React.createElement('div', {
+                      className: "text-white/70 text-xs text-center mt-1"
+                    }, 'Гиро')
+                  )
+                )
+              ),
+
+              React.createElement('div', {
+                className: "absolute left-6 pointer-events-auto control-area",
+                style: { top: 'calc(66.666667% + 10px)' }
+              },
+                React.createElement('div', {
+                  className: "flex flex-col items-center"
+                },
+                  React.createElement('div', {
+                    ref: joystickRef,
+                    className: "relative w-24 h-24 bg-black/40 rounded-full border-4 border-white/50 flex items-center justify-center shadow-lg",
+                    onTouchStart: (e) => {
+                      e.preventDefault();
+                      setMobileJoystick(prev => ({ ...prev, active: true }));
+                    },
+                    onTouchMove: (e) => {
+                      e.preventDefault();
+                      if (joystickRef.current) {
+                        const rect = joystickRef.current.getBoundingClientRect();
+                        const centerX = rect.left + rect.width / 2;
+                        const centerY = rect.top + rect.height / 2;
+                        const touch = e.touches[0];
+                        
+                        const deltaX = touch.clientX - centerX;
+                        const deltaY = touch.clientY - centerY;
+                        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+                        const maxDistance = rect.width / 2 - 10;
+                        
+                        if (distance <= maxDistance) {
+                          setMobileJoystick({
+                            x: deltaX / maxDistance,
+                            y: deltaY / maxDistance,
+                            active: true
+                          });
+                        } else {
+                          const angle = Math.atan2(deltaY, deltaX);
+                          setMobileJoystick({
+                            x: Math.cos(angle),
+                            y: Math.sin(angle),
+                            active: true
+                          });
+                        }
+                      }
+                    },
+                    onTouchEnd: (e) => {
+                      e.preventDefault();
+                      setMobileJoystick({ x: 0, y: 0, active: false });
+                    },
+                    style: { touchAction: 'none' }
+                  },
+                    React.createElement('div', {
+                      className: "w-8 h-8 bg-white/90 rounded-full transition-transform duration-100 shadow-md",
+                      style: {
+                        transform: `translate(${mobileJoystick.x * 30}px, ${mobileJoystick.y * 30}px)`
+                      }
+                    })
+                  ),
+                  React.createElement('div', {
+                    className: "text-white/80 text-sm text-center mt-2 font-semibold"
+                  }, 'Движение')
+                )
+              ),
+
+              React.createElement('div', {
+                className: "absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none control-area"
+              },
+                React.createElement('div', {
+                  className: "w-8 h-8 border-2 border-white/60 rounded-full flex items-center justify-center"
+                },
+                  React.createElement('div', {
+                    className: "w-2 h-2 bg-white/80 rounded-full"
+                  })
+                )
+              ),
+
+              React.createElement('div', {
+                className: "absolute top-16 right-4 w-16 h-16 bg-black/50 rounded-lg border-2 border-white/30 pointer-events-auto control-area"
+              },
+                React.createElement('div', {
+                  className: "relative w-full h-full p-1"
+                },
+                  Array.from({ length: 12 }, (_, i) => {
+                    const row = Math.floor(i / 3);
+                    const col = i % 3;
+                    const plot = garden[i];
+                    return React.createElement('div', {
+                      key: i,
+                      className: `absolute w-1 h-1 rounded-sm ${
+                        plot ? (plot.stage === 3 ? 'bg-green-400' : 'bg-yellow-400') : 'bg-gray-600'
+                      }`,
+                      style: {
+                        left: `${col * 25 + 20}%`,
+                        top: `${row * 20 + 20}%`
+                      }
+                    });
+                  }),
+                  React.createElement('div', {
+                    className: "absolute w-1.5 h-1.5 bg-blue-400 rounded-full",
+                    style: {
+                      left: `${((playerPosition.x + 8) / 16) * 80 + 10}%`,
+                      top: `${((playerPosition.z + 8) / 16) * 80 + 10}%`,
+                      transform: 'translate(-50%, -50%)'
+                    }
+                  })
+                ),
+                React.createElement('div', {
+                  className: "text-white/70 text-xs text-center"
+                }, 'Карта')
+              )
+            ),
+
+            !isFirstPerson && React.createElement('div', {
+              className: "absolute top-0 left-0 right-0 bg-gradient-to-b from-gray-900/90 to-transparent p-4 backdrop-blur-sm"
+            },
+              React.createElement('div', {
+                className: "flex justify-center gap-6 mb-4"
+              },
+                React.createElement('div', {
+                  className: "bg-yellow-500/90 px-4 py-2 rounded-full shadow-lg"
+                },
+                  React.createElement('span', {
+                    className: "text-white font-bold"
+                  }, `💰 ${coins} монет`)
+                ),
+                React.createElement('div', {
+                  className: "bg-blue-500/90 px-4 py-2 rounded-full shadow-lg"
+                },
+                  React.createElement('span', {
+                    className: "text-white font-bold"
+                  }, `💧 ${waterAmount} воды`)
+                )
+              ),
+
+              React.createElement('div', {
+                className: "mb-4"
+              },
+                React.createElement('h3', {
+                  className: "text-white text-center mb-2 font-bold"
+                }, 'Выберите семена:'),
+                React.createElement('div', {
+                  className: `grid gap-2 ${isMobile ? 'grid-cols-2' : 'grid-cols-3'}`
+                },
+                  Object.entries(seeds).map(([key, seed]) =>
+                    React.createElement('button', {
+                      key: key,
+                      onClick: () => setSelectedSeed(key),
+                      className: `p-2 rounded-lg border-2 transition-all ${isMobile ? 'text-sm' : 'text-xs'} ${
+                        selectedSeed === key
+                          ? 'border-yellow-400 bg-yellow-500/80 text-white'
+                          : 'border-gray-300 bg-white/80 hover:bg-white active:bg-gray-200'
+                      }`,
+                      style: { touchAction: 'manipulation' }
+                    },
+                      React.createElement('div', {
+                        className: "font-semibold"
+                      }, seed.name),
+                      React.createElement('div', {
+                        className: "text-gray-600"
+                      }, `💰 ${seed.cost}`)
+                    )
+                  )
+                )
+              ),
+
+              React.createElement('div', {
+                className: "text-center text-white/80 text-sm"
+              },
+                isMobile ? React.createElement('div', null,
+                  React.createElement('p', null, '👆 Коснитесь грядки: посадить → полить → собрать'),
+                  React.createElement('p', null, '🔄 Один палец - поворот, два пальца - зум'),
+                  React.createElement('p', null, '🚶‍♂️ Кнопка "Войти в сад" - режим ходьбы')
+                ) : React.createElement('div', null,
+                  React.createElement('p', null, '🖱️ Кликните по грядке: посадить → полить → собрать'),
+                  React.createElement('p', null, '📷 Камера автоматически вращается вокруг сада'),
+                  React.createElement('p', null, '⌨️ F или кнопка - войти в сад')
+                )
+              )
+            ),
+
+            isFirstPerson && React.createElement('div', {
+              className: "absolute top-16 left-4 right-4 flex justify-center gap-4 pointer-events-none"
+            },
+              React.createElement('div', {
+                className: "bg-yellow-500/90 px-3 py-1 rounded-full shadow-lg text-sm"
+              },
+                React.createElement('span', {
+                  className: "text-white font-bold"
+                }, `💰 ${coins}`)
+              ),
+              React.createElement('div', {
+                className: "bg-blue-500/90 px-3 py-1 rounded-full shadow-lg text-sm"
+              },
+                React.createElement('span', {
+                  className: "text-white font-bold"
+                }, `💧 ${waterAmount}`)
+              )
+            ),
+
+            React.createElement('div', {
+              className: "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-gray-900/90 to-transparent p-4"
+            },
+              React.createElement('div', {
+                className: `flex justify-center gap-2 ${isMobile && isFirstPerson ? 'flex-wrap' : 'gap-4'}`
+              },
+                !(isFirstPerson && isMobile) && React.createElement('button', {
+                  onClick: buyWater,
+                  disabled: coins < 50,
+                  className: "px-4 py-2 bg-blue-600 text-white rounded-lg disabled:bg-gray-500 hover:bg-blue-700 active:bg-blue-800 transition-all shadow-lg",
+                  style: { touchAction: 'manipulation' }
+                }, '💧 Купить воду (50 монет)'),
+                React.createElement('button', {
+                  onClick: () => setIsFirstPerson(!isFirstPerson),
+                  className: `px-4 py-2 text-white rounded-lg transition-all shadow-lg ${
+                    isFirstPerson ? 'bg-purple-600 hover:bg-purple-700' : 'bg-green-600 hover:bg-green-700'
+                  }`,
+                  style: { touchAction: 'manipulation' }
+                }, isFirstPerson ? '🎮 Выйти' : '🚶‍♂️ Войти в сад'),
+                isFirstPerson && isMobile && React.createElement('button', {
+                  onClick: buyWater,
+                  disabled: coins < 50,
+                  className: "px-3 py-2 bg-blue-600 text-white rounded-lg disabled:bg-gray-500 active:bg-blue-800 transition-all shadow-lg text-sm",
+                  style: { touchAction: 'manipulation' }
+                }, '💧 Вода'),
+                isMobile && !isFirstPerson && React.createElement('button', {
+                  onClick: () => setTouchControls(prev => ({ ...prev, autoRotate: !prev.autoRotate })),
+                  className: `px-4 py-2 text-white rounded-lg transition-all shadow-lg ${
+                    touchControls.autoRotate ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 hover:bg-gray-700'
+                  }`,
+                  style: { touchAction: 'manipulation' }
+                }, touchControls.autoRotate ? '⏸️ Стоп' : '▶️ Авто')
+              ),
+
+              isFirstPerson && React.createElement('div', {
+                className: "text-center text-white/80 text-sm mt-2"
+              },
+                isMobile ? React.createElement('div', null,
+                  React.createElement('p', null, '🕹️ Джойстик - движение, 🌱 кнопка - действие'),
+                  React.createElement('p', null, `👆 Водите пальцем по экрану - поворот головы ${gyroSupported ? '📱 гироскоп' : ''}`)
+                ) : React.createElement('div', null,
+                  React.createElement('p', null, '🚶‍♂️ WASD или стрелки - ходьба, мышь - взгляд'),
+                  React.createElement('p', null, '🖱️ Зажмите левую кнопку мыши для поворота')
+                )
+              )
+            ),
+
+            notifications.length > 0 && React.createElement('div', {
+              className: "fixed top-4 right-4 z-50 space-y-2"
+            },
+              notifications.map(notification =>
+                React.createElement('div', {
+                  key: notification.id,
+                  className: "bg-green-600 text-white px-4 py-2 rounded-lg shadow-xl animate-bounce backdrop-blur-sm border border-green-400"
+                }, notification.message)
+              )
+            )
+          );
+        };
+
+        ReactDOM.render(React.createElement(Garden3D), document.getElementById('root'));
+    </script>
+</body>
+</html>
